@@ -1,54 +1,46 @@
-import os
-import datetime
 import firebase_admin
-from firebase_admin import credentials, firestore
-import requests
+from firebase_admin import credentials, firestore, messaging
+from datetime import datetime
+import json
+import os
 
-# Inicializar Firebase
-cred = credentials.Certificate({
-    "type": os.getenv("FIREBASE_TYPE"),
-    "project_id": os.getenv("FIREBASE_PROJECT_ID"),
-    "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
-    "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
-    "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
-    "client_id": os.getenv("FIREBASE_CLIENT_ID"),
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
-})
+def initialize_firebase():
+    # Cargar credencial desde variable de entorno
+    service_account_json = os.environ.get("SERVICE_ACCOUNT_KEY")
+    if not service_account_json:
+        raise ValueError("Falta la variable SERVICE_ACCOUNT_KEY")
+    cred = credentials.Certificate(json.loads(service_account_json))
+    firebase_admin.initialize_app(cred)
 
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+def send_reminders():
+    db = firestore.client()
+    now = datetime.now()
+    current_hour = now.strftime("%H:%M")  # ejemplo: '14:30'
 
-# Hora actual
-now = datetime.datetime.now()
-current_hour = now.strftime("%H:%M")
+    users_ref = db.collection('users')
+    users = users_ref.stream()
 
-# Buscar usuarios que deban tomar medicina a esta hora
-users_ref = db.collection("users")
-users = users_ref.stream()
+    for user in users:
+        data = user.to_dict()
+        reminder_time = data.get('reminderTime')  # asegúrate de que esta clave exista
+        fcm_token = data.get('fcmToken')
 
-for user in users:
-    data = user.to_dict()
-    medication_times = data.get("medicationTimes", [])  # Ej: ["08:00", "14:00"]
-    if current_hour in medication_times:
-        token = data.get("fcmToken")
-        if token:
-            # Enviar notificación push
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"key={os.getenv('FCM_SERVER_KEY')}"
-            }
-            payload = {
-                "to": token,
-                "notification": {
-                    "title": "Hora de tu medicina",
-                    "body": "Es momento de tomar tu medicamento."
-                },
-                "data": {
-                    "route": "notifications"
-                }
-            }
-            response = requests.post("https://fcm.googleapis.com/fcm/send", json=payload, headers=headers)
-            print(f"Notificación enviada a {data.get('name')}, respuesta: {response.status_code}")
+        if reminder_time == current_hour and fcm_token:
+            # Enviar notificación
+            message = messaging.Message(
+                token=fcm_token,
+                notification=messaging.Notification(
+                    title="Hora de tu medicina 💊",
+                    body="Es hora de tomar tu medicamento.",
+                ),
+                data={"route": "notifications"},
+            )
+            try:
+                response = messaging.send(message)
+                print(f"Notificación enviada a {data.get('name')}, response: {response}")
+            except Exception as e:
+                print(f"Error al enviar notificación a {data.get('name')}: {e}")
+
+if __name__ == "__main__":
+    initialize_firebase()
+    send_reminders()
