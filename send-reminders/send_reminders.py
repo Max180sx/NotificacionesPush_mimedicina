@@ -92,7 +92,12 @@ def send_reminders():
                     print(f"❌ Error enviando notificación a {name}: {e}")
 
 if __name__ == "__main__":
-    initialize_firebase()
-    db = firestore.client()
-    reset_taken_flags(db)
-    send_reminders()
+    try:
+        print("🔵 Ejecutando script de recordatorios...")
+        initialize_firebase()
+        db = firestore.client()
+        reset_taken_flags(db)
+        send_reminders()
+        print("✅ Script completado")
+    except Exception as e:
+        print(f"❌ Excepción atrapada en main: {e}")
