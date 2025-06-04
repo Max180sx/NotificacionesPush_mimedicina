@@ -15,20 +15,16 @@ def reset_taken_flags(db):
     today_str = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now()
 
-    users_ref = db.collection('users')
-    users = users_ref.stream()
-
+    users = db.collection('users').stream()
     for user in users:
         user_id = user.id
-        meds_ref = users_ref.document(user_id).collection('medications')
-        meds = meds_ref.stream()
+        meds = db.collection('users').document(user_id).collection('medications').stream()
 
         for med in meds:
-            med_data = med.to_dict()
-            med_id = med.id
-            last_taken = med_data.get("lastTakenDate")
-            hour = med_data.get("hourToTake")
-            minute = med_data.get("minuteToTake")
+            data = med.to_dict()
+            last_taken = data.get("lastTakenDate")
+            hour = data.get("hourToTake")
+            minute = data.get("minuteToTake")
 
             if last_taken == today_str:
                 continue
@@ -36,73 +32,134 @@ def reset_taken_flags(db):
             med_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now >= med_time:
                 try:
-                    meds_ref.document(med_id).update({"taken": False})
-                    print(f"Reiniciado 'taken' de '{med_data.get('name')}' para usuario {user_id}")
+                    db.collection('users').document(user_id).collection('medications').document(med.id).update({"taken": False})
+                    print(f"♻️ Reiniciado 'taken' de '{data.get('name')}' para {user_id}")
                 except Exception as e:
-                    print(f"Error reiniciando medicamento {med_id}: {e}")
+                    print(f"❌ Error reiniciando '{data.get('name')}': {e}")
 
 def is_within_minutes(target_hour, target_minute, window=2):
     now = datetime.now()
     target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-    delta_minutes = abs((now - target_time).total_seconds()) / 60
-    return delta_minutes <= window
+    delta = abs((now - target_time).total_seconds()) / 60
+    return delta <= window
 
-def send_reminders():
-    db = firestore.client()
+def notify_user(user_id, fcm_token, med_name, dosage):
+    try:
+        message = messaging.Message(
+            token=fcm_token,
+            notification=messaging.Notification(
+                title="Hora de tu medicina 💊",
+                body=f"Toma: {med_name} - {dosage}",
+            ),
+            data={"route": "notifications"},
+        )
+        response = messaging.send(message)
+        print(f"✅ Notificación enviada al usuario {user_id}: {response}")
+    except Exception as e:
+        print(f"❌ Error notificando a {user_id}: {e}")
+
+def notify_caregiver(db, caregiver_id, title, body):
+    doc_ref = db.collection("users").document(caregiver_id)
+
+    # Enviar notificación push si hay FCM token
+    caregiver_doc = doc_ref.get()
+    caregiver_data = caregiver_doc.to_dict()
+    fcm_token = caregiver_data.get("fcmToken")
+    if fcm_token:
+        try:
+            message = messaging.Message(
+                token=fcm_token,
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                data={"type": "medication", "route": "notifications"},
+            )
+            messaging.send(message)
+            print(f"📲 Notificado cuidador {caregiver_id}")
+        except Exception as e:
+            print(f"❌ FCM error cuidador {caregiver_id}: {e}")
+
+    # Notificación Firestore
+    doc_ref.collection("notifications").add({
+        "title": title,
+        "body": body,
+        "type": "medication",
+        "read": False,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+    })
+
+    # Incrementar contador de notificaciones no leídas
+    doc_ref.update({
+        "unreadNotifications": firestore.Increment(1)
+    })
+
+def send_all_notifications(db):
     now = datetime.now()
-    current_hour = now.hour
-    current_minute = now.minute
     today_str = now.strftime("%Y-%m-%d")
+    current_hour, current_minute = now.hour, now.minute
 
-    users_ref = db.collection('users')
-    users = users_ref.stream()
-
+    users = db.collection('users').stream()
     for user in users:
-        user_data = user.to_dict()
         user_id = user.id
+        user_data = user.to_dict()
+        user_name = user_data.get('name', 'Usuario')
         fcm_token = user_data.get('fcmToken')
-        name = user_data.get('name', 'Usuario')
 
-        if not fcm_token:
-            continue
-
-        meds_ref = users_ref.document(user_id).collection('medications')
-        meds = meds_ref.stream()
-
+        meds = db.collection('users').document(user_id).collection('medications').stream()
         for med in meds:
-            med_data = med.to_dict()
-            hour = med_data.get("hourToTake")
-            minute = med_data.get("minuteToTake")
-            taken = med_data.get("taken", False)
-            enabled = med_data.get("enabled", False)
+            data = med.to_dict()
+            med_id = med.id
+            name = data.get("name", "medicina")
+            dosage = data.get("dosage", "")
+            hour = data.get("hourToTake")
+            minute = data.get("minuteToTake")
+            taken = data.get("taken", False)
+            enabled = data.get("enabled", False)
+            last_taken = data.get("lastTakenDate")
 
-            print(f"⏰ Evaluando {med_data.get('name')} ({hour}:{minute}) - Actual {current_hour}:{current_minute}, taken={taken}, enabled={enabled}")
-
-            if not enabled or taken:
+            if not enabled:
                 continue
 
-            if is_within_minutes(hour, minute):
-                try:
-                    message = messaging.Message(
-                        token=fcm_token,
-                        notification=messaging.Notification(
-                            title="Hora de tu medicina 💊",
-                            body=f"Toma: {med_data.get('name')} - {med_data.get('dosage')}",
-                        ),
-                        data={"route": "notifications"},
-                    )
-                    response = messaging.send(message)
-                    print(f"✅ Notificación enviada a {name} ({user_id}): {response}")
-                except Exception as e:
-                    print(f"❌ Error enviando notificación a {name}: {e}")
+            print(f"⏰ {user_name} - {name} ({hour}:{minute}) - actual: {current_hour}:{current_minute}, taken={taken}")
 
-if __name__ == "__main__":
+            scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            # 🔔 Recordatorio
+            if is_within_minutes(hour, minute) and not taken:
+                if fcm_token:
+                    notify_user(user_id, fcm_token, name, dosage)
+
+            # 🟢 Confirmación al cuidador
+            elif last_taken == today_str and taken:
+                links = db.collection("caregiver_links").where("patientId", "==", user_id).stream()
+                for link in links:
+                    caregiver_id = link.to_dict().get("caregiverId")
+                    if caregiver_id:
+                        title = f"{user_name} tomó su medicina ✅"
+                        body = f"{name} fue tomado hoy ({today_str})"
+                        notify_caregiver(db, caregiver_id, title, body)
+
+            # 🔴 Atraso
+            elif not taken and now > scheduled_time and last_taken != today_str:
+                links = db.collection("caregiver_links").where("patientId", "==", user_id).stream()
+                for link in links:
+                    caregiver_id = link.to_dict().get("caregiverId")
+                    if caregiver_id:
+                        title = f"{user_name} NO tomó su medicina ❗"
+                        body = f"{name} debió tomarse a las {hour:02}:{minute:02}"
+                        notify_caregiver(db, caregiver_id, title, body)
+
+def main():
     try:
         print("🔵 Ejecutando script de recordatorios...")
         initialize_firebase()
         db = firestore.client()
         reset_taken_flags(db)
-        send_reminders()
+        send_all_notifications(db)
         print("✅ Script completado")
     except Exception as e:
-        print(f"❌ Excepción atrapada en main: {e}")
+        print(f"❌ Excepción atrapada: {e}")
+
+if __name__ == "__main__":
+    main()
