@@ -1,6 +1,7 @@
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
-from datetime import datetime, timedelta
+from datetime import datetime
+from pytz import timezone
 import json
 import os
 
@@ -12,7 +13,8 @@ def initialize_firebase():
     firebase_admin.initialize_app(cred)
 
 def get_local_time():
-    return datetime.utcnow() - timedelta(hours=4)
+    chile_tz = timezone("America/Santiago")
+    return datetime.now(chile_tz)
 
 def reset_taken_flags(db):
     now = get_local_time()
@@ -135,7 +137,7 @@ def send_all_notifications(db):
 
             # 🟢 Confirmación al cuidador
             elif last_taken == today_str and taken:
-                links = db.collection("caregiver_links").where("patientId", "==", user_id).stream()
+                links = db.collection("caregiver_links").where(filter=("patientId", "==", user_id)).stream()
                 for link in links:
                     caregiver_id = link.to_dict().get("caregiverId")
                     if caregiver_id:
@@ -145,7 +147,7 @@ def send_all_notifications(db):
 
             # 🔴 Atraso
             elif not taken and now > scheduled_time and last_taken != today_str:
-                links = db.collection("caregiver_links").where("patientId", "==", user_id).stream()
+                links = db.collection("caregiver_links").where(filter=("patientId", "==", user_id)).stream()
                 for link in links:
                     caregiver_id = link.to_dict().get("caregiverId")
                     if caregiver_id:
