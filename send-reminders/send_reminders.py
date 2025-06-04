@@ -30,11 +30,9 @@ def reset_taken_flags(db):
             hour = med_data.get("hourToTake")
             minute = med_data.get("minuteToTake")
 
-            # Si ya se tomó hoy, no hacer nada
             if last_taken == today_str:
                 continue
 
-            # Si la hora programada ya pasó hoy, se reinicia `taken`
             med_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now >= med_time:
                 try:
@@ -42,6 +40,12 @@ def reset_taken_flags(db):
                     print(f"Reiniciado 'taken' de '{med_data.get('name')}' para usuario {user_id}")
                 except Exception as e:
                     print(f"Error reiniciando medicamento {med_id}: {e}")
+
+def is_within_minutes(target_hour, target_minute, window=2):
+    now = datetime.now()
+    target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    delta_minutes = abs((now - target_time).total_seconds()) / 60
+    return delta_minutes <= window
 
 def send_reminders():
     db = firestore.client()
@@ -72,12 +76,13 @@ def send_reminders():
             taken = med_data.get("taken", False)
             enabled = med_data.get("enabled", False)
 
+            print(f"⏰ Evaluando {med_data.get('name')} ({hour}:{minute}) - Actual {current_hour}:{current_minute}, taken={taken}, enabled={enabled}")
+
             if not enabled or taken:
                 continue
 
-            if hour == current_hour and minute == current_minute:
+            if is_within_minutes(hour, minute):
                 try:
-                    # Enviar notificación push
                     message = messaging.Message(
                         token=fcm_token,
                         notification=messaging.Notification(
