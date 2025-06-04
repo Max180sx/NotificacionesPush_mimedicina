@@ -185,7 +185,7 @@ def main():
         db = firestore.client()
         
         # Migrar datos una vez (opcional)
-        migrate_medication_data(db)
+        # migrate_medication_data(db)
         
         reset_daily_states(db)
         process_notifications(db)
