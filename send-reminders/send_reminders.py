@@ -1,6 +1,6 @@
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 
@@ -11,9 +11,12 @@ def initialize_firebase():
     cred = credentials.Certificate(json.loads(service_account_json))
     firebase_admin.initialize_app(cred)
 
+def get_local_time():
+    return datetime.utcnow() - timedelta(hours=4)
+
 def reset_taken_flags(db):
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    now = datetime.now()
+    now = get_local_time()
+    today_str = now.strftime("%Y-%m-%d")
 
     users = db.collection('users').stream()
     for user in users:
@@ -38,7 +41,7 @@ def reset_taken_flags(db):
                     print(f"❌ Error reiniciando '{data.get('name')}': {e}")
 
 def is_within_minutes(target_hour, target_minute, window=2):
-    now = datetime.now()
+    now = get_local_time()
     target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
     delta = abs((now - target_time).total_seconds()) / 60
     return delta <= window
@@ -95,7 +98,7 @@ def notify_caregiver(db, caregiver_id, title, body):
     })
 
 def send_all_notifications(db):
-    now = datetime.now()
+    now = get_local_time()
     today_str = now.strftime("%Y-%m-%d")
     current_hour, current_minute = now.hour, now.minute
 
