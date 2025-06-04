@@ -6,7 +6,7 @@ import json
 import os
 from google.cloud.firestore_v1 import FieldFilter
 
-# 🔐 Inicializa Firebase con clave de servicio desde variable de entorno
+# 🔐 Inicializa Firebase
 def initialize_firebase():
     service_account_json = os.environ.get("SERVICE_ACCOUNT_KEY")
     if not service_account_json:
@@ -14,51 +14,58 @@ def initialize_firebase():
     cred = credentials.Certificate(json.loads(service_account_json))
     firebase_admin.initialize_app(cred)
 
-# ⏰ Devuelve la hora actual en zona horaria de Chile
+# ⏰ Hora actual en Chile
 def get_local_time():
     chile_tz = timezone("America/Santiago")
     return datetime.now(chile_tz)
 
-# 📅 Calcula la próxima hora programada para notificar (hoy o mañana)
-def calculate_next_notification_time(hour, minute):
+# 📅 Calcula la próxima notificación para múltiples horarios
+def calculate_next_notification(scheduled_times):
     now = get_local_time()
-    scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now > scheduled_time:
-        scheduled_time += timedelta(days=1)
-    return scheduled_time.isoformat()
+    
+    for time in scheduled_times:
+        scheduled_time = now.replace(
+            hour=time["hour"],
+            minute=time["minute"],
+            second=0, microsecond=0
+        )
+        if scheduled_time > now:
+            return scheduled_time.isoformat()
+    
+    # Si todos los horarios de hoy pasaron, programar para mañana
+    first_time = scheduled_times[0]
+    next_day = now + timedelta(days=1)
+    return next_day.replace(
+        hour=first_time["hour"],
+        minute=first_time["minute"],
+        second=0, microsecond=0
+    ).isoformat()
 
-# ♻️ Reinicia "taken=False" y programa la próxima notificación al cambiar de día
-def reset_taken_flags(db):
-    now = get_local_time()
-    today_str = now.strftime("%Y-%m-%d")
-
+# 🔄 Actualiza nextNotification para medicamentos existentes
+def migrate_medication_data(db):
     users = db.collection('users').stream()
     for user in users:
         user_id = user.id
         meds = db.collection('users').document(user_id).collection('medications').stream()
-
+        
         for med in meds:
             data = med.to_dict()
-            last_taken = data.get("lastTakenDate")
+            if 'hourToTake' in data:  # Migrar estructura antigua
+                new_data = {
+                    "scheduledTimes": [{
+                        "hour": data["hourToTake"],
+                        "minute": data["minuteToTake"]
+                    }],
+                    "takenTimes": {},
+                    "nextNotification": calculate_next_notification([{
+                        "hour": data["hourToTake"],
+                        "minute": data["minuteToTake"]
+                    }])
+                }
+                med.reference.update(new_data)
+                print(f"🔄 Migrado medicamento {med.id} para usuario {user_id}")
 
-            if last_taken == today_str:
-                continue
-
-            hour = data.get("hourToTake")
-            minute = data.get("minuteToTake")
-            med_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-            if now >= med_time:
-                try:
-                    db.collection('users').document(user_id).collection('medications').document(med.id).update({
-                        "taken": False,
-                        "nextNotificationTime": calculate_next_notification_time(hour, minute)
-                    })
-                    print(f"♻️ Reiniciado 'taken' y programado próxima notificación para '{data.get('name')}'")
-                except Exception as e:
-                    print(f"❌ Error reiniciando medicamento: {e}")
-
-# 📲 Notifica al paciente vía FCM
+# 📲 Notificar al paciente
 def notify_user(user_id, fcm_token, med_name, dosage):
     try:
         message = messaging.Message(
@@ -69,86 +76,106 @@ def notify_user(user_id, fcm_token, med_name, dosage):
             ),
             data={"route": "notifications"},
         )
-        response = messaging.send(message)
-        print(f"✅ Notificación enviada a {user_id}: {med_name}")
+        messaging.send(message)
+        print(f"✅ Notificación enviada a {user_id} para {med_name}")
     except Exception as e:
         print(f"❌ Error notificando a {user_id}: {e}")
 
-# 📡 Notifica al cuidador y registra en Firestore
+# 📡 Notificar al cuidador
 def notify_caregiver(db, caregiver_id, title, body):
     try:
-        doc_ref = db.collection("users").document(caregiver_id)
-        caregiver_data = doc_ref.get().to_dict()
-        fcm_token = caregiver_data.get("fcmToken")
-
-        if fcm_token:
+        caregiver_ref = db.collection("users").document(caregiver_id)
+        caregiver_data = caregiver_ref.get().to_dict()
+        
+        if caregiver_data.get("fcmToken"):
             message = messaging.Message(
-                token=fcm_token,
+                token=caregiver_data["fcmToken"],
                 notification=messaging.Notification(title=title, body=body),
                 data={"type": "medication", "route": "notifications"},
             )
             messaging.send(message)
-            print(f"📲 Notificado cuidador {caregiver_id}")
-
-        doc_ref.collection("notifications").add({
+        
+        caregiver_ref.collection("notifications").add({
             "title": title,
             "body": body,
             "type": "medication",
             "read": False,
             "timestamp": firestore.SERVER_TIMESTAMP,
         })
-        doc_ref.update({"unreadNotifications": firestore.Increment(1)})
+        caregiver_ref.update({"unreadNotifications": firestore.Increment(1)})
     except Exception as e:
         print(f"❌ Error notificando cuidador: {e}")
 
-# 🚀 Procesa notificaciones solo cuando es el momento exacto
-def send_all_notifications(db):
-    now = get_local_time()
-    today_str = now.strftime("%Y-%m-%d")
+# ♻️ Reiniciar estados diariamente
+def reset_daily_states(db):
+    today = get_local_time().strftime("%Y-%m-%d")
+    
+    users = db.collection('users').stream()
+    for user in users:
+        user_id = user.id
+        meds = db.collection('users').document(user_id).collection('medications').stream()
+        
+        for med in meds:
+            data = med.to_dict()
+            if today not in data.get("takenTimes", {}):
+                med.reference.update({
+                    "takenTimes": {today: []},
+                    "nextNotification": calculate_next_notification(data["scheduledTimes"])
+                })
 
+# 🚀 Procesar notificaciones
+def process_notifications(db):
+    now = get_local_time()
+    current_time_str = now.strftime("%H:%M")
+    today = now.strftime("%Y-%m-%d")
+    
     users = db.collection('users').stream()
     for user in users:
         user_id = user.id
         user_data = user.to_dict()
-        user_name = user_data.get('name', 'Usuario')
         fcm_token = user_data.get('fcmToken')
-
+        
         meds = db.collection('users').document(user_id).collection('medications').stream()
         for med in meds:
             data = med.to_dict()
-            name = data.get("name", "medicina")
-            dosage = data.get("dosage", "")
-            hour = data.get("hourToTake")
-            minute = data.get("minuteToTake")
-            taken = data.get("taken", False)
-            enabled = data.get("enabled", False)
-            next_notification = data.get("nextNotificationTime")
-
-            if not enabled or not next_notification:
+            if not data.get("enabled", False):
                 continue
-
-            scheduled_time = datetime.fromisoformat(next_notification)
-            is_time_to_notify = now >= scheduled_time
-
-            # 🔔 Notificación al paciente (solo si es la hora exacta y no se ha tomado)
-            if is_time_to_notify and not taken and fcm_token:
-                notify_user(user_id, fcm_token, name, dosage)
-                new_next_time = calculate_next_notification_time(hour, minute)
-                db.collection('users').document(user_id).collection('medications').document(med.id).update({
-                    "nextNotificationTime": new_next_time
-                })
-                print(f"⏰ Recordatorio enviado a {user_name} para {name} a las {scheduled_time.strftime('%H:%M')}")
-
-            # 🔴 Alerta de atraso al cuidador (si pasó la hora y no se ha tomado)
-            if not taken and now > scheduled_time and data.get("lastTakenDate") != today_str:
-                links = db.collection("caregiver_links").where(filter=FieldFilter("patientId", "==", user_id)).stream()
-                for link in links:
-                    caregiver_id = link.to_dict().get("caregiverId")
-                    if caregiver_id:
-                        title = f"{user_name} NO tomó su medicina ❗"
-                        body = f"{name} debió tomarse a las {hour:02}:{minute:02}"
-                        notify_caregiver(db, caregiver_id, title, body)
-                        print(f"⚠️ Alerta de atraso enviada a cuidador de {user_name}")
+                
+            scheduled_times = data.get("scheduledTimes", [])
+            taken_times = data.get("takenTimes", {}).get(today, [])
+            
+            for time in scheduled_times:
+                time_str = f"{time['hour']:02}:{time['minute']:02}"
+                scheduled_datetime = now.replace(
+                    hour=time["hour"],
+                    minute=time["minute"],
+                    second=0, microsecond=0
+                )
+                
+                # Notificación a tiempo
+                if current_time_str == time_str and time_str not in taken_times:
+                    if fcm_token:
+                        notify_user(user_id, fcm_token, data["name"], data["dosage"])
+                    
+                    # Actualizar próxima notificación
+                    med.reference.update({
+                        "nextNotification": calculate_next_notification(scheduled_times)
+                    })
+                
+                # Notificación de atraso (15 minutos después)
+                elif (now - scheduled_datetime).total_seconds() > 900 and time_str not in taken_times:
+                    links = db.collection("caregiver_links").where(
+                        filter=FieldFilter("patientId", "==", user_id)
+                    ).stream()
+                    
+                    for link in links:
+                        caregiver_id = link.to_dict().get("caregiverId")
+                        if caregiver_id:
+                            notify_caregiver(
+                                db, caregiver_id,
+                                f"{user_data.get('name', 'Usuario')} NO tomó su medicina ❗",
+                                f"{data['name']} debió tomarse a las {time_str}"
+                            )
 
 # 🔁 Función principal
 def main():
@@ -156,8 +183,12 @@ def main():
         print("\n🔵 Iniciando script de recordatorios...")
         initialize_firebase()
         db = firestore.client()
-        reset_taken_flags(db)
-        send_all_notifications(db)
+        
+        # Migrar datos una vez (opcional)
+        migrate_medication_data(db)
+        
+        reset_daily_states(db)
+        process_notifications(db)
         print("✅ Script completado a las:", get_local_time().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception as e:
         print(f"❌ Error crítico: {e}")
