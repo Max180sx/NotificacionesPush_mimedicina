@@ -1,7 +1,0 @@
-services:
-  - type: cron
-    name: send-medication-reminders
-    schedule: "@every 30m"
-    runtime: python
-    buildCommand: ""
-    startCommand: "python send_reminders.py"
